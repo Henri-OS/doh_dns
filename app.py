@@ -1,13 +1,12 @@
-from fastapi import FastAPI, Query, HTTPException, Request, Response
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi import FastAPI, Query, Request, Response
+from fastapi.responses import JSONResponse
 import socket
 import asyncio
-from dnslib import DNSRecord, QTYPE
 import dns.resolver
 
 app = FastAPI()
 
-# Função para resolver DNS de forma assíncrona
+# Função para resolver DNS de forma assíncrona com gethostbyname
 async def async_gethostbyname(domain: str) -> str:
     loop = asyncio.get_event_loop()
     try:
@@ -33,17 +32,20 @@ async def dns_query_json(
     type: str = Query("A"),
     request: Request = None
 ):
-    # Verifica se o header Accept é DNS JSON (usado por curl/firefox/chrome)
+    # Verifica se o header Accept é DNS JSON (RFC 8484)
     if "application/dns-json" not in request.headers.get("accept", ""):
         return Response(status_code=406, content="Not Acceptable")
 
     try:
-        # Faz a resolução usando dnspython
-        resolver = dns.resolver.Resolver()
+        # Cria um novo resolver para cada requisição (cache é limpo naturalmente)
+        resolver = dns.resolver.Resolver(configure=True)
+        resolver.timeout = 2
+        resolver.lifetime = 3
+        # Usa DNS do sistema ou /etc/resolv.conf (sem cache global)
+
         qtype = type.upper()
         answer = resolver.resolve(name, qtype)
 
-        # Constrói a resposta no formato RFC 8484
         result = {
             "Status": 0,
             "TC": False,
@@ -63,7 +65,12 @@ async def dns_query_json(
         }
         return JSONResponse(content=result)
     except dns.resolver.NoAnswer:
-        return JSONResponse(content={"Status": 3, "Question": [{"name": name, "type": dns.rdatatype.from_text(type)}]})
+        return JSONResponse(
+            content={
+                "Status": 3,
+                "Question": [{"name": name, "type": dns.rdatatype.from_text(type)}]
+            }
+        )
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
@@ -71,5 +78,5 @@ async def dns_query_json(
 async def root():
     return {"status": "DNS over HTTPS server is running"}
 
-# Para rodar com uvicorn:
-# uvicorn nome_do_arquivo:app --host 0.0.0.0 --port 8000 --reload
+# Iniciar com:
+# uvicorn app:app --host 0.0.0.0 --port 8000 --reload
