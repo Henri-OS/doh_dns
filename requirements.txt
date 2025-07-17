@@ -1,5 +1,0 @@
-fastapi
-uvicorn
-dnspython
-requests
-httpx
