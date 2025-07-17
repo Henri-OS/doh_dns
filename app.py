@@ -1,12 +1,46 @@
 from fastapi import FastAPI, Query, HTTPException, Request, Response
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 import socket
 import asyncio
 import dns.resolver
+import time
 
 app = FastAPI()
 
-# Função para resolver DNS de forma assíncrona
+# ---------------------------
+# Proteção: Limite de Requisições por IP
+# ---------------------------
+RATE_LIMIT = {}
+MAX_REQUESTS = 10
+WINDOW_SECONDS = 60
+
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        ip = request.client.host
+        now = time.time()
+        history = RATE_LIMIT.get(ip, [])
+        # Limpa requisições antigas
+        history = [t for t in history if now - t < WINDOW_SECONDS]
+        if len(history) >= MAX_REQUESTS:
+            return JSONResponse(status_code=429, content={"error": "Limite de requisições excedido"})
+        history.append(now)
+        RATE_LIMIT[ip] = history
+        return await call_next(request)
+
+app.add_middleware(RateLimitMiddleware)
+
+# ---------------------------
+# Domínios bloqueados
+# ---------------------------
+BLOCKED_DOMAINS = ["localhost", "127.0.0.1", "::1", ".onion"]
+
+def is_blocked(domain: str) -> bool:
+    return any(bad in domain for bad in BLOCKED_DOMAINS)
+
+# ---------------------------
+# Resolver DNS (gethostbyname async)
+# ---------------------------
 async def async_gethostbyname(domain: str) -> str:
     loop = asyncio.get_event_loop()
     try:
@@ -15,8 +49,14 @@ async def async_gethostbyname(domain: str) -> str:
     except socket.gaierror:
         raise
 
+# ---------------------------
+# Endpoint: Resolução simples de IP
+# ---------------------------
 @app.get("/resolve")
 async def resolve(domain: str = Query(..., description="Domínio para resolver")):
+    if is_blocked(domain):
+        return JSONResponse(status_code=400, content={"error": "Domínio não permitido"})
+
     try:
         ip = await async_gethostbyname(domain)
         return {"domain": domain, "ip": ip}
@@ -26,13 +66,19 @@ async def resolve(domain: str = Query(..., description="Domínio para resolver")
             content={"error": f"Não foi possível resolver '{domain}'"}
         )
 
+# ---------------------------
+# Endpoint: DNS-over-HTTPS estilo Google
+# ---------------------------
 @app.get("/dns-query")
 async def dns_query_json(
     name: str = Query(...),
     type: str = Query("A"),
     request: Request = None
 ):
-    # Verifica se o header Accept é DNS JSON (usado por curl/firefox/chrome)
+    if is_blocked(name):
+        return JSONResponse(status_code=400, content={"error": "Domínio não permitido"})
+
+    # Apenas aceita application/dns-json
     if "application/dns-json" not in request.headers.get("accept", ""):
         return Response(status_code=406, content="Not Acceptable")
 
@@ -68,10 +114,12 @@ async def dns_query_json(
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
+# ---------------------------
+# Página inicial (status)
+# ---------------------------
 @app.get("/")
 async def root():
-    return {"status": "DNS over HTTPS server is running"}
-
-# Para rodar:
-# uvicorn app:app --host 0.0.0.0 --port 8000 --reload
-
+    return {
+        "status": "online",
+        "message": "Servidor DNS sobre HTTPS (educacional). Uso abusivo será bloqueado.",
+    }
